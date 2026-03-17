@@ -16,7 +16,7 @@ namespace OpenClawInstaller
         private readonly bool saveDataLocal;
         private readonly bool downloadSkills; // 新增字段
 
-        private readonly string nodeUrl = "https://registry.npmmirror.com/-/binary/node/v22.13.1/node-v22.13.1-win-x64.zip";
+        private readonly string nodeUrl = "https://registry.npmmirror.com/-/binary/node/v24.14.0/node-v24.14.0-win-x64.zip";
         private readonly string gitUrl = "https://npmmirror.com/mirrors/git-for-windows/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip";
 
         // 构造函数增加 downloadSkills 参数

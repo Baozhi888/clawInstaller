@@ -12,18 +12,20 @@ namespace OpenClawInstaller
     {
         private readonly string installDir;
         private readonly string githubProxy;
+        private readonly string openclawVersion; // 新增字段：版本号
         private readonly bool isDebug;
         private readonly bool saveDataLocal;
-        private readonly bool downloadSkills; // 新增字段
+        private readonly bool downloadSkills;
 
         private readonly string nodeUrl = "https://registry.npmmirror.com/-/binary/node/v24.14.0/node-v24.14.0-win-x64.zip";
         private readonly string gitUrl = "https://npmmirror.com/mirrors/git-for-windows/v2.44.0.windows.1/MinGit-2.44.0-64-bit.zip";
 
-        // 构造函数增加 downloadSkills 参数
-        public DeployWorker(string installDir, string githubProxy, bool isDebug = false, bool saveDataLocal = false, bool downloadSkills = false)
+        // 构造函数增加 openclawVersion 参数
+        public DeployWorker(string installDir, string githubProxy, string openclawVersion, bool isDebug = false, bool saveDataLocal = false, bool downloadSkills = false)
         {
             this.installDir = Path.GetFullPath(installDir);
             this.githubProxy = githubProxy?.Trim();
+            this.openclawVersion = string.IsNullOrWhiteSpace(openclawVersion) ? "latest" : openclawVersion.Trim();
             this.isDebug = isDebug;
             this.saveDataLocal = saveDataLocal;
             this.downloadSkills = downloadSkills;
@@ -47,7 +49,7 @@ namespace OpenClawInstaller
             string gitDir = Path.Combine(installDir, "git_env");
             string appDir = Path.Combine(installDir, "openclaw_app");
             string dataDir = Path.Combine(installDir, "data");
-            string skillsBinDir = Path.Combine(installDir, "skills_bin"); // 新增：skills目录
+            string skillsBinDir = Path.Combine(installDir, "skills_bin"); 
 
             if (saveDataLocal)
             {
@@ -69,7 +71,7 @@ namespace OpenClawInstaller
             }
 
             // ==========================================
-            // 新增：0. 处理 Skills 下载 (基于内置配置)
+            // 0. 处理 Skills 下载 (基于内置配置)
             // ==========================================
             List<string> skillsPaths = new List<string>();
             if (downloadSkills)
@@ -80,7 +82,6 @@ namespace OpenClawInstaller
                 {
                     if (string.IsNullOrEmpty(tool.Url)) continue;
 
-                    // 从 Url 解析出默认文件名（无后缀）作为备用名称
                     string defaultName = Path.GetFileNameWithoutExtension(new Uri(tool.Url).LocalPath);
                     string folderName = string.IsNullOrEmpty(tool.Name) ? defaultName : tool.Name;
                     
@@ -88,7 +89,6 @@ namespace OpenClawInstaller
                     
                     string targetUrl = tool.Url;
                     
-                    // 应用 Github 代理
                     if (!string.IsNullOrEmpty(githubProxy) && targetUrl.Contains("github.com"))
                     {
                         string proxy = githubProxy.EndsWith("/") ? githubProxy : githubProxy + "/";
@@ -105,10 +105,9 @@ namespace OpenClawInstaller
                     {
                         string downloadDest = Path.Combine(installDir, Path.GetFileName(new Uri(tool.Url).LocalPath));
                         logger.Report($"正在下载 {folderName}...");
-                        await Utils.DownloadFileAsync(targetUrl, downloadDest, p => {}); // 可以在此处添加分段进度提示
+                        await Utils.DownloadFileAsync(targetUrl, downloadDest, p => {}); 
                         
                         logger.Report($"正在配置 {folderName}...");
-                        // 根据后缀判断是否解压，支持zip
                         if (downloadDest.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
                         {
                             Utils.ExtractZipDirect(downloadDest, toolDir);
@@ -121,7 +120,6 @@ namespace OpenClawInstaller
                         }
                     }
 
-                    // 拼接 bin 路径：将正反斜杠格式化兼容
                     string binPath = string.IsNullOrEmpty(tool.BinDir) 
                         ? toolDir 
                         : Path.Combine(toolDir, tool.BinDir.TrimStart('/', '\\').Replace("/", "\\"));
@@ -261,18 +259,19 @@ namespace OpenClawInstaller
             }
 
             // ==========================================
-            // 5. 使用 npm 直接安装 OpenClaw (带重试机制)
+            // 5. 使用 npm 直接安装 OpenClaw (带重试机制与指定版本)
             // ==========================================
             int maxRetries = 3;
             bool installSuccess = false;
 
+            // 这里使用 openclawVersion 替换原先写死的 openclaw
             string npmInstallArgs = isDebug 
-                ? "install openclaw --cache ../.npm-cache --loglevel verbose" 
-                : "install openclaw --cache ../.npm-cache --no-fund --no-audit";
+                ? $"install openclaw@{openclawVersion} --cache ../.npm-cache --loglevel verbose" 
+                : $"install openclaw@{openclawVersion} --cache ../.npm-cache --no-fund --no-audit";
 
             for (int i = 0; i < maxRetries; i++)
             {
-                logger.Report($"正在通过 npm 安装 OpenClaw 核心组件 (第 {i + 1} 次尝试，最多 {maxRetries} 次)...");
+                logger.Report($"正在通过 npm 安装 OpenClaw@{openclawVersion} 核心组件 (第 {i + 1} 次尝试，最多 {maxRetries} 次)...");
                 if (i == 0) progress.Report(60);
                 string buildType = "cpu"; 
                 try 
@@ -348,7 +347,7 @@ namespace OpenClawInstaller
 
             if (!installSuccess)
             {
-                throw new Exception($"npm install openclaw 经过 {maxRetries} 次尝试后仍然失败。请检查网络连接或更换 GitHub 代理。");
+                throw new Exception($"npm install openclaw@{openclawVersion} 经过 {maxRetries} 次尝试后仍然失败。请检查网络连接或更换 GitHub 代理。");
             }
             progress.Report(80);
 
@@ -437,18 +436,74 @@ namespace OpenClawInstaller
             
             ps1Builder.AppendLine("Set-Location -Path \"$scriptDir\\openclaw_app\"");
             ps1Builder.AppendLine("");
+
+            // ==========================================
+            // 新增：利用封装的 Start-InNewWindow 实现各选项新开终端窗口
+            // ==========================================
+            string terminalEnvInject = saveDataLocal 
+                ? " `$env:USERPROFILE = `\"$scriptDir\\data`\"; `$env:HOME = `\"$scriptDir\\data`\"; `$env:APPDATA = `\"$scriptDir\\data\\AppData\\Roaming`\"; `$env:LOCALAPPDATA = `\"$scriptDir\\data\\AppData\\Local`\"; "
+                : "";
+            string escapedSkillsPathStr = skillsPathStr.Replace("$", "`$");
+
+            ps1Builder.AppendLine("function Start-InNewWindow {");
+            ps1Builder.AppendLine("    param([string]$Title, [string]$CommandToRun)");
+            ps1Builder.AppendLine($"    $initCmd = \"Set-Location -LiteralPath `\"$scriptDir\\openclaw_app`\"; `$env:PATH = `\"$scriptDir\\nodejs;$scriptDir\\git_env\\cmd;$scriptDir\\openclaw_app\\node_modules\\.bin;{escapedSkillsPathStr}`$env:PATH`\";{terminalEnvInject}\"");
+            ps1Builder.AppendLine("    $fullCmd = \"$initCmd; $CommandToRun\"");
+            ps1Builder.AppendLine("    $encodedCmd = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fullCmd))");
+            ps1Builder.AppendLine("    if (Get-Command wt.exe -ErrorAction SilentlyContinue) {");
+            ps1Builder.AppendLine("        Start-Process wt.exe -ArgumentList \"-w new-tab --title `\"$Title`\" powershell -NoExit -EncodedCommand $encodedCmd\"");
+            ps1Builder.AppendLine("    } else {");
+            ps1Builder.AppendLine("        Start-Process powershell -ArgumentList \"-NoExit -EncodedCommand $encodedCmd\"");
+            ps1Builder.AppendLine("    }");
+            ps1Builder.AppendLine("}");
+            ps1Builder.AppendLine("");
+
             ps1Builder.AppendLine("function Run-Onboard {");
-            ps1Builder.AppendLine("    Clear-Host");
-            ps1Builder.AppendLine("    Write-Host \"✓ 正在运行 OpenClaw Onboard 向导...\" -ForegroundColor Cyan");
-            ps1Builder.AppendLine("    Write-Host \"提示: 首次运行或更换 API Key 时需要执行此操作。\"");
-            ps1Builder.AppendLine("    Write-Host \"========================================\"");
-            ps1Builder.AppendLine("    npx openclaw onboard");
-            ps1Builder.AppendLine("    Write-Host \"\"");
-            ps1Builder.AppendLine("    Write-Host \"向导运行结束！按任意键返回主菜单...\"");
-            ps1Builder.AppendLine("    $null = $host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")");
+            ps1Builder.AppendLine("    $cmd = \"Clear-Host; Write-Host `\"✓ 正在运行 OpenClaw Onboard 向导...`\" -ForegroundColor Cyan; Write-Host `\"提示: 首次运行或更换 API Key 时需要执行此操作。`\"; Write-Host `\"========================================`\"; npx openclaw onboard\"");
+            ps1Builder.AppendLine("    Start-InNewWindow -Title \"OpenClaw Onboard\" -CommandToRun $cmd");
+            ps1Builder.AppendLine("    Write-Host \"已在新终端启动向导窗口。\" -ForegroundColor Cyan");
+            ps1Builder.AppendLine("    Start-Sleep -Seconds 1");
             ps1Builder.AppendLine("    Show-Menu");
             ps1Builder.AppendLine("}");
             ps1Builder.AppendLine("");
+
+            ps1Builder.AppendLine("function Run-Gateway {");
+            ps1Builder.AppendLine("    $path1 = \"$env:USERPROFILE\\.openclaw\\gateway.cmd\"");
+            ps1Builder.AppendLine("    $path2 = \"$env:USERPROFILE\\gateway.cmd\"");
+            ps1Builder.AppendLine("    $gatewayPath = $null");
+            ps1Builder.AppendLine("");
+            ps1Builder.AppendLine("    if (Test-Path $path1) {");
+            ps1Builder.AppendLine("        $gatewayPath = $path1");
+            ps1Builder.AppendLine("    } elseif (Test-Path $path2) {");
+            ps1Builder.AppendLine("        $gatewayPath = $path2");
+            ps1Builder.AppendLine("    }");
+            ps1Builder.AppendLine("");
+            ps1Builder.AppendLine("    if ($null -ne $gatewayPath) {");
+            ps1Builder.AppendLine("        $cmd = \"Clear-Host; Write-Host `\"✓ 正在运行 Gateway... ($gatewayPath)`\" -ForegroundColor Cyan; Write-Host `\"========================================`\"; & `\"$gatewayPath`\"\"");
+            ps1Builder.AppendLine("        Start-InNewWindow -Title \"OpenClaw Gateway\" -CommandToRun $cmd");
+            ps1Builder.AppendLine("        Write-Host \"已在新终端启动 Gateway 窗口。\" -ForegroundColor Cyan");
+            ps1Builder.AppendLine("    } else {");
+            ps1Builder.AppendLine("        Write-Host \"错误: 未找到 Gateway 启动脚本。请确认您已运行过向导配置。\" -ForegroundColor Red");
+            ps1Builder.AppendLine("        Write-Host \"尝试查找的路径:\"");
+            ps1Builder.AppendLine("        Write-Host \" - $path1\"");
+            ps1Builder.AppendLine("        Write-Host \" - $path2\"");
+            ps1Builder.AppendLine("        Write-Host \"按任意键返回主菜单...\"");
+            ps1Builder.AppendLine("        $null = $host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")");
+            ps1Builder.AppendLine("    }");
+            ps1Builder.AppendLine("    Start-Sleep -Seconds 1");
+            ps1Builder.AppendLine("    Show-Menu");
+            ps1Builder.AppendLine("}");
+            ps1Builder.AppendLine("");
+
+            ps1Builder.AppendLine("function Open-Terminal {");
+            ps1Builder.AppendLine("    $cmd = \"Clear-Host; Write-Host `\"已进入 OpenClaw 终端环境，可以直接运行 openclaw 命令。`\" -ForegroundColor Green\"");
+            ps1Builder.AppendLine("    Start-InNewWindow -Title \"OpenClaw Terminal\" -CommandToRun $cmd");
+            ps1Builder.AppendLine("    Write-Host \"已打开新终端窗口。\" -ForegroundColor Cyan");
+            ps1Builder.AppendLine("    Start-Sleep -Seconds 1");
+            ps1Builder.AppendLine("    Show-Menu");
+            ps1Builder.AppendLine("}");
+            ps1Builder.AppendLine("");
+
             ps1Builder.AppendLine("function Show-Menu {");
             ps1Builder.AppendLine("    Clear-Host");
             ps1Builder.AppendLine("    Write-Host \"  🦞 OpenClaw\"");
@@ -472,56 +527,6 @@ namespace OpenClawInstaller
             ps1Builder.AppendLine("        \"4\" { exit }");
             ps1Builder.AppendLine("        default { Show-Menu }");
             ps1Builder.AppendLine("    }");
-            ps1Builder.AppendLine("}");
-            ps1Builder.AppendLine("");
-
-            ps1Builder.AppendLine("function Run-Gateway {");
-            ps1Builder.AppendLine("    $path1 = \"$env:USERPROFILE\\.openclaw\\gateway.cmd\"");
-            ps1Builder.AppendLine("    $path2 = \"$env:USERPROFILE\\gateway.cmd\"");
-            ps1Builder.AppendLine("    $gatewayPath = $null");
-            ps1Builder.AppendLine("");
-            ps1Builder.AppendLine("    if (Test-Path $path1) {");
-            ps1Builder.AppendLine("        $gatewayPath = $path1");
-            ps1Builder.AppendLine("    } elseif (Test-Path $path2) {");
-            ps1Builder.AppendLine("        $gatewayPath = $path2");
-            ps1Builder.AppendLine("    }");
-            ps1Builder.AppendLine("");
-            ps1Builder.AppendLine("    if ($null -ne $gatewayPath) {");
-            ps1Builder.AppendLine("        Clear-Host");
-            ps1Builder.AppendLine("        Write-Host \"✓ 正在运行 Gateway... ($gatewayPath)\"");
-            ps1Builder.AppendLine("        Write-Host \"========================================\"");
-            ps1Builder.AppendLine("        & $gatewayPath");
-            ps1Builder.AppendLine("        Write-Host \"\"");
-            ps1Builder.AppendLine("        Write-Host \"Gateway 执行结束！按任意键返回主菜单...\"");
-            ps1Builder.AppendLine("        $null = $host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")");
-            ps1Builder.AppendLine("    } else {");
-            ps1Builder.AppendLine("        Write-Host \"错误: 未找到 Gateway 启动脚本。请确认您已运行过向导配置。\"");
-            ps1Builder.AppendLine("        Write-Host \"尝试查找的路径:\"");
-            ps1Builder.AppendLine("        Write-Host \" - $path1\"");
-            ps1Builder.AppendLine("        Write-Host \" - $path2\"");
-            ps1Builder.AppendLine("        Write-Host \"按任意键返回主菜单...\"");
-            ps1Builder.AppendLine("        $null = $host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")");
-            ps1Builder.AppendLine("    }");
-            ps1Builder.AppendLine("    Show-Menu");
-            ps1Builder.AppendLine("}");
-            ps1Builder.AppendLine("");
-            ps1Builder.AppendLine("function Open-Terminal {");
-            
-            string terminalEnvInject = saveDataLocal 
-                ? " `$env:USERPROFILE = `\"$scriptDir\\data`\"; `$env:HOME = `\"$scriptDir\\data`\"; `$env:APPDATA = `\"$scriptDir\\data\\AppData\\Roaming`\"; `$env:LOCALAPPDATA = `\"$scriptDir\\data\\AppData\\Local`\"; "
-                : "";
-            
-            string escapedSkillsPathStr = skillsPathStr.Replace("$", "`$");
-            ps1Builder.AppendLine($"    $initCmd = \"Set-Location -LiteralPath `\"$scriptDir\\openclaw_app`\"; `$env:PATH = `\"$scriptDir\\nodejs;$scriptDir\\git_env\\cmd;$scriptDir\\openclaw_app\\node_modules\\.bin;{escapedSkillsPathStr}`$env:PATH`\";{terminalEnvInject}\";");
-            ps1Builder.AppendLine("    $encodedCmd = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($initCmd))");
-            ps1Builder.AppendLine("    if (Get-Command wt.exe -ErrorAction SilentlyContinue) {");
-            ps1Builder.AppendLine("        Start-Process wt.exe -ArgumentList \"-w new-tab --title OpenClaw powershell -NoExit -EncodedCommand $encodedCmd\"");
-            ps1Builder.AppendLine("    } else {");
-            ps1Builder.AppendLine("        Start-Process powershell -ArgumentList \"-NoExit\", \"-EncodedCommand\", $encodedCmd");
-            ps1Builder.AppendLine("    }");
-            ps1Builder.AppendLine("    Write-Host \"已打开新终端窗口，可以直接运行 openclaw 命令。按任意键返回主菜单...\"");
-            ps1Builder.AppendLine("    $null = $host.UI.RawUI.ReadKey(\"NoEcho,IncludeKeyDown\")");
-            ps1Builder.AppendLine("    Show-Menu");
             ps1Builder.AppendLine("}");
             ps1Builder.AppendLine("");
             ps1Builder.AppendLine("Show-Menu");
